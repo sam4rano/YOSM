@@ -1,87 +1,179 @@
+import json
 import os
-import torch
-import logging
+from argparse import ArgumentParser
+from argparse import Namespace
+from typing import Any
+from typing import Dict
+from typing import Optional
 
-import numpy as np
-from torch.utils.data import TensorDataset
+from classification_dataset import ClassificationDataset
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import precision_recall_fscore_support
+from torch.utils.data import Dataset
+from transformers import AutoConfig
+from transformers import AutoModelForSequenceClassification
+from transformers import AutoTokenizer
+from transformers import EvalPrediction
+from transformers import Trainer
+from transformers import TrainingArguments
+from transformers import XLMRobertaTokenizer
 
-logger = logging.getLogger(__name__)
+from src.utils import create_logger
+
+MODEL_MAX_LENGTH = 512
+SPLITS_MAP = {"train": "train.tsv", "dev": "dev.tsv", "test": "test.tsv"}
+
+NEWS_LABELS = {
+    "yoruba": ["nigeria", "africa", "world", "entertainment", "health", "sport", "politics"],
+    "malagasy": ["Politika" , "Kolontsaina", "Zon'olombelona", "Siansa_sy_Teknolojia", "Tontolo_iainana"],
+    "hausa": ["africa", "world", "health", "nigeria", "politics"],
+    "swahili": ["uchumi", "kitaifa", "michezo", "kimataifa", "burudani", "afya"],
+    "pidgin": ["entertainment", "africa", "sport", "nigeria", "world"],
+    "shona": ["nhau dzezimbabwe", "matongerwo enyika", "africa", "kodzero-dzevanhu", "mari-nehupfumi",  "hutano",  "mitambo"],
+    "lingala": ["rdc", "politiki / politique", "bokengi / securite", "justice", "bokolongono / santé / medecine"],
+    "somali": ["soomaaliya", "wararka", "caalamka", "maraykanka", "afrika", "bogga ciyaaraha" ],
+    "english": ["world", "sports", "business", "sci/tech"],
+    "amharic": ['ሀገር አቀፍ ዜና / local news', 'ስፖርት / sport', 'ፖለቲካ / politics', 'ዓለም አቀፍ ዜና / international news', 'ቢዝነስ / business', 'መዝናኛ / entertainment'],
+    "kinyarwanda": ['politics', 'sport', 'economy', 'health', 'entertainment', 'history', 'technology', 'tourism', 'culture', 'fashion', 'religion', 'environment', 'education', 'relationship'],
+    "zulu": ['ezemidlalo', 'ezokungcebeleka', 'imibono', 'ezezimoto', 'intandokazi'],
+
+}
+KEYS_NOT_IN_TRAIN_ARGS = [
+    "model_dir",
+    "tok_dir",
+    "data_dir",
+    "language",
+    "max_seq_length",
+]
 
 
-class Instance:
+class ClassificationTrainer:
+    def __init__(self, args: Namespace) -> None:
+        self.params = args
+        if os.path.isdir(self.params.output_dir):
+            raise ValueError(
+                f"Output directory - {self.params.output_dir} - already exists, please delete or specify a new one "
+            )
+        os.makedirs(self.params.output_dir)
 
-    def __init__(self, text, label):
-        self.text = text
-        self.label = label
+        tokenizer_class = AutoTokenizer
+        if not self.params.tok_dir == "bert-base-multilingual-cased":
+            # AfriBERTa's trained spm tokenizer model does not work with autotokenizer
+            # out of the box, so we have to use the model-specific tokenizer
+            tokenizer_class = XLMRobertaTokenizer
 
-class InputFeatures(object):
-    """A single set of features of data."""
+        self.tokenizer = tokenizer_class.from_pretrained(self.params.tok_dir)
+        self.tokenizer.model_max_length = self.params.max_seq_length
+        self.logger = create_logger(os.path.join(self.params.output_dir, "train_log.txt"))
 
-    def __init__(self, input_ids, attention_mask, token_type_ids, label):
-        self.input_ids = input_ids
-        self.attention_mask = attention_mask
-        self.token_type_ids = token_type_ids
-        self.label = label
+        self._create_data()
 
-def read_instances_from_file(data_dir, mode, delimiter="\t"):
-    file_path = os.path.join(data_dir, "{}.tsv".format(mode))
-    instances = []
+    def _create_data(self) -> None:
 
-    with open(file_path, "r", encoding='utf-8') as input_file:
-        line_data = input_file.read()
+        self.logger.info("Creating datasets...")
 
-    line_data = line_data.splitlines()
-    for l, line in enumerate(line_data):
-        if l==0:
-            continue
-        else:
-            text_vals = line.strip().split(delimiter)
-            text, label = ' '.join(text_vals[:-1]), text_vals[-1]
-            instances.append(Instance(text, label))
+        self.labels = NEWS_LABELS[self.params.language]
+        self.label2id = {label: i for i, label in enumerate(self.labels)}
 
-    return instances
-
-def convert_instances_to_features_and_labels(instances, tokenizer, labels, max_seq_length):
-    label_map = {label: i for i, label in enumerate(labels)}
-
-    features = []
-    for instance_idx, instance in enumerate(instances):
-        tokenization_result = tokenizer.encode_plus(text=instance.text,
-                                                    max_length=max_seq_length, pad_to_max_length=True,
-                                                     truncation=True)
-        token_ids = tokenization_result["input_ids"]
-        try:
-            token_type_ids = tokenization_result["token_type_ids"]
-        except:
-            token_type_ids = None
-        attention_masks = tokenization_result["attention_mask"]
-
-        if instance.label not in label_map:
-            continue
-        label = label_map[instance.label]
-
-        if "num_truncated_tokens" in tokenization_result:
-            logger.info(f"Removed {tokenization_result['num_truncated_tokens']} tokens from {instance.text} as they "
-                         f"were longer than max_seq_length {max_seq_length}.")
-
-        if instance_idx < 3:
-            logger.info("Tokenization example")
-            logger.info(f"  text: {instance.text}")
-            logger.info(f"  tokens (by input): {tokenizer.tokenize(instance.text)}")
-            logger.info(f"  token_ids: {tokenization_result['input_ids']}")
-            #logger.info(f"  token_type_ids: {tokenization_result['token_type_ids']}")
-            logger.info(f"  attention mask: {tokenization_result['attention_mask']}")
-
-        features.append(
-            InputFeatures(input_ids=token_ids, attention_mask=attention_masks, token_type_ids=token_type_ids, label=label)
+        self.train_dataset = ClassificationDataset(
+            os.path.join(self.params.data_dir, SPLITS_MAP["train"]), self.tokenizer, self.label2id
+        )
+        self.eval_dataset = ClassificationDataset(
+            os.path.join(self.params.data_dir, SPLITS_MAP["dev"]), self.tokenizer, self.label2id
+        )
+        self.test_dataset = ClassificationDataset(
+            os.path.join(self.params.data_dir, SPLITS_MAP["test"]), self.tokenizer, self.label2id
         )
 
-    return features
+    def create_model(self) -> None:
 
-def get_labels(path):
-    if path:
-        with open(path, "r") as f:
-            labels = f.read().splitlines()
-        return labels
-    else:
-        return ["positive", "negative"]
+        self.logger.info("Building model...")
+
+        config = AutoConfig.from_pretrained(
+            self.params.model_dir,
+            num_labels=len(self.labels),
+            id2label={str(i): label for i, label in enumerate(self.labels)},
+            label2id=self.label2id,
+        )
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.params.model_dir, config=config
+        )
+
+    @staticmethod
+    def compute_metrics(pred: EvalPrediction) -> Dict[str, float]:
+        labels = pred.label_ids
+        preds = pred.predictions.argmax(-1)
+        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="macro")
+        acc = accuracy_score(labels, preds)
+        return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
+
+    def train(self) -> None:
+        self.create_model()
+        self.initialize_train_args()
+        self.logger.info(
+            f"Starting Training with the following arguments:\n {json.dumps(vars(self.training_args), indent=2, default=str)}"
+        )
+        self.trainer = Trainer(
+            model=self.model,
+            args=self.training_args,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            tokenizer=self.tokenizer,
+            compute_metrics=self.compute_metrics,
+        )
+        self.trainer.train()
+        self.logger.info("Saving model...")
+        self.trainer.save_model()
+        self.trainer.state.save_to_json(os.path.join(self.params.output_dir, "trainer_state.json"))
+        self.logger.info("Evaluating...")
+        self.evaluate()
+
+    def _evaluate(self, mode: str, dataset: Optional[Dataset] = None) -> None:
+        """
+        Perform evaluation on a given dataset.
+        """
+        if mode == "test":
+            dataset = self.test_dataset
+        eval_output = self.trainer.evaluate(dataset, metric_key_prefix=mode)
+        output_eval_file = os.path.join(self.params.output_dir, f"{mode}_results.txt")
+        with open(output_eval_file, "w") as writer:
+            for key, value in sorted(eval_output.items()):
+                writer.write(f"{key} = {value}\n")
+
+    def evaluate(self) -> None:
+        self._evaluate(mode="eval")
+        self._evaluate(mode="test")
+
+    def initialize_train_args(self) -> TrainingArguments:
+        self.training_args = TrainingArguments(**self._get_train_args_kwargs())
+
+    def _get_train_args_kwargs(self) -> Dict[str, Any]:
+        kwargs = vars(self.params)
+        for key in KEYS_NOT_IN_TRAIN_ARGS:
+            if key in kwargs:
+                del kwargs[key]
+        return kwargs
+
+
+if __name__ == "__main__":
+
+    parser = ArgumentParser()
+    parser.add_argument("--model_dir", type=str, required=True)
+    parser.add_argument("--tok_dir", type=str, required=True)
+    parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--language", type=str, required=True)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=32)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=32)
+    parser.add_argument("--save_steps", type=int, default=50000)
+    parser.add_argument("--max_seq_length", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--num_train_epochs", type=int, default=25)
+    parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--dataloader_num_workers", type=int, default=4)
+    parser.add_argument("--learning_rate", type=float, default=0.00005)
+
+    args = parser.parse_args()
+
+    trainer = ClassificationTrainer(args)
+    trainer.train()

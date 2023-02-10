@@ -6,7 +6,7 @@ do
 	export OUTPUT_FILE=test_result$j
 	export OUTPUT_PREDICTION=test_predictions
 	export BATCH_SIZE=32
-	export NUM_EPOCHS=20
+	export NUM_EPOCHS=5
 	export SAVE_STEPS=5000
 	export SEED=$j
 

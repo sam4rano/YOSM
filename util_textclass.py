@@ -78,4 +78,4 @@ def get_labels(path):
             labels = f.read().splitlines()
         return labels
     else:
-        return  ['Africa', 'Entertainment', 'Health', 'Nigeria', 'Sport', 'World']
+        return  ['Africa', 'Entertainment', 'Health', 'Nigeria', 'Sport', 'World', 'Business']

@@ -1,0 +1,4 @@
+made on afriberta.sh
+export BERT_MODEL=castorini/afriberta_large 
+to
+export BERT_MODEL=Davlan/afro-xlmr-small

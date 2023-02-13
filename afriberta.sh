@@ -1,7 +1,7 @@
 for j in 1 2 3 4 5
 do
 	export MAX_LENGTH=128
-	export BERT_MODEL=Davlan/afro-xlmr-small
+	export BERT_MODEL=Davlan/afro-xlmr-base
 	export OUTPUT_DIR=yo_afriberta
 	export OUTPUT_FILE=test_result$j
 	export OUTPUT_PREDICTION=test_predictions

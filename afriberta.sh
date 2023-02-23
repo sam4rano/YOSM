@@ -10,7 +10,7 @@ do
 	export SAVE_STEPS=5000
 	export SEED=$j
 
-	CUDA_VISIBLE_DEVICES=0 python3 train_textclass.py --data_dir data/yorNews \
+	CUDA_VISIBLE_DEVICES=0 python3 train_textclass.py --data_dir data/sentiment \
 	--model_type xlmroberta \
 	--model_name_or_path $BERT_MODEL \
 	--output_dir $OUTPUT_DIR \
